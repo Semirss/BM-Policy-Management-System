@@ -6,7 +6,7 @@ export default defineConfig({
     server: {
         proxy: {
             '/personal-accidents': {
-                target: 'https://k4qpn24fy4.execute-api.eu-north-1.amazonaws.com',
+                target: 'https://p83ik3w242.execute-api.eu-north-1.amazonaws.com/dev',
                 changeOrigin: true,
             }
         }

@@ -2,11 +2,11 @@
     "rewrites": [
         {
             "source": "/personal-accidents",
-            "destination": "https://k4qpn24fy4.execute-api.eu-north-1.amazonaws.com/personal-accidents"
+            "destination": "https://p83ik3w242.execute-api.eu-north-1.amazonaws.com/dev/personal-accidents"
         },
         {
             "source": "/personal-accidents/:path*",
-            "destination": "https://k4qpn24fy4.execute-api.eu-north-1.amazonaws.com/personal-accidents/:path*"
+            "destination": "https://p83ik3w242.execute-api.eu-north-1.amazonaws.com/dev/personal-accidents/:path*"
         },
         {
             "source": "/(.*)",
