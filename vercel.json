@@ -1,0 +1,16 @@
+{
+    "rewrites": [
+        {
+            "source": "/personal-accidents",
+            "destination": "https://k4qpn24fy4.execute-api.eu-north-1.amazonaws.com/personal-accidents"
+        },
+        {
+            "source": "/personal-accidents/:path*",
+            "destination": "https://k4qpn24fy4.execute-api.eu-north-1.amazonaws.com/personal-accidents/:path*"
+        },
+        {
+            "source": "/(.*)",
+            "destination": "/index.html"
+        }
+    ]
+}

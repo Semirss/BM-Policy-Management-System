@@ -1,0 +1,12 @@
+.env
+.env.local
+.env.production
+.env.development
+.env.test
+.env.example
+node_modules
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+.agent
