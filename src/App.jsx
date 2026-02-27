@@ -73,9 +73,19 @@ function App() {
 
         try {
             const response = await fetch(API_URL);
-            const apiResponse = await response.json();
-            const data = JSON.parse(apiResponse.body);
-            const policies = data.personalaccidents;
+            const data = await response.json();
+
+            // The new API might return the object directly or nestled in a body property
+            // depending on how API Gateway is configured, adapt to handle both cases.
+            let policies = [];
+            if (data.body) {
+                const parsedBody = typeof data.body === 'string' ? JSON.parse(data.body) : data.body;
+                policies = parsedBody.personalaccidents || [];
+            } else if (data.personalaccidents) {
+                policies = data.personalaccidents;
+            } else {
+                policies = data;
+            }
 
             const foundPolicy = policies.find(p => p.employee_id === employeeId);
 
