@@ -39,12 +39,23 @@ function App() {
     const [amountToAdd, setAmountToAdd] = useState('');
     const [updatingBenefit, setUpdatingBenefit] = useState(false);
 
+    // Payment type state
+    const [amountError, setAmountError] = useState(null);
+    const [paymentType, setPaymentType] = useState(null); // null | 'cash' | 'credit'
+    const [awaitingPaymentType, setAwaitingPaymentType] = useState(false);
+
     // Receipt upload state
     const [awaitingReceiptPhoto, setAwaitingReceiptPhoto] = useState(false);
-    const [receiptFile, setReceiptFile] = useState(null);
-    const [receiptPreview, setReceiptPreview] = useState(null);
     const [awaitingConfirmation, setAwaitingConfirmation] = useState(false);
     const [addedAmount, setAddedAmount] = useState(0);
+
+    // Cash documents (all optional)
+    const [medCertFile, setMedCertFile] = useState(null);
+    const [medCertPreview, setMedCertPreview] = useState(null);
+    const [prescriptionFile, setPrescriptionFile] = useState(null);
+    const [prescriptionPreview, setPrescriptionPreview] = useState(null);
+    const [receiptFile, setReceiptFile] = useState(null);
+    const [receiptPreview, setReceiptPreview] = useState(null);
 
     // Track which history images have been loaded. Values: 'loading', 'loaded', or undefined
     const [loadedReceipts, setLoadedReceipts] = useState({});
@@ -105,9 +116,13 @@ function App() {
     const resetUpdateState = () => {
         setSelectedBenefitIndex(null);
         setAmountToAdd('');
+        setAmountError(null);
+        setPaymentType(null);
+        setAwaitingPaymentType(false);
         setAwaitingReceiptPhoto(false);
-        setReceiptFile(null);
-        setReceiptPreview(null);
+        setMedCertFile(null); setMedCertPreview(null);
+        setPrescriptionFile(null); setPrescriptionPreview(null);
+        setReceiptFile(null); setReceiptPreview(null);
         setAwaitingConfirmation(false);
         setAddedAmount(0);
     };
@@ -122,22 +137,37 @@ function App() {
             return;
         }
 
+        // Check if adding this amount would exceed 100%
+        const benefit = policy.benefits[selectedBenefitIndex];
+        const usedAmount = parseFloat(benefit.usedAmount) || 0;
+        const totalAmount = parseFloat(benefit.amount) || 1;
+        if (usedAmount + amount > totalAmount) {
+            setAmountError(`Cannot process. This claim amount (${amount.toFixed(2)}) exceeds the remaining maximum limit for this benefit.`);
+            return;
+        }
+
+        setAmountError(null);
         setError(null);
         setAddedAmount(amount);
+        setAwaitingPaymentType(true);
+    };
+
+    const handleSelectPaymentType = (type) => {
+        setPaymentType(type);
+        setAwaitingPaymentType(false);
         setAwaitingReceiptPhoto(true);
     };
 
-    const handleFileChange = (e) => {
+    const handleFileChange = (setter, previewSetter) => (e) => {
         const file = e.target.files[0];
         if (file) {
-            setReceiptFile(file);
-            setReceiptPreview(URL.createObjectURL(file));
-            setAwaitingConfirmation(true);
+            setter(file);
+            previewSetter(URL.createObjectURL(file));
         }
     };
 
-    const submitReceipt = async () => {
-        if (!receiptFile || selectedBenefitIndex === null || !addedAmount) return;
+    const submitClaim = async () => {
+        if (selectedBenefitIndex === null || !addedAmount) return;
 
         setUpdatingBenefit(true);
         setError(null);
@@ -145,59 +175,74 @@ function App() {
         try {
             const benefit = policy.benefits[selectedBenefitIndex];
             const newAmount = parseFloat(benefit.usedAmount) + addedAmount;
-
             const mainMemberName = policy.mainMembers?.[0]?.name || 'Unknown';
 
-            const caption = `New receipt submitted for ${mainMemberName} (Employee ID: ${employeeId})\n` +
-                `Benefit: ${benefit.type}\n` +
-                `Amount added: ${addedAmount}\n` +
-                `Updated used amount: ${newAmount}`;
+            // For cash payments, send each document that was uploaded (all optional)
+            if (paymentType === 'cash') {
+                const docs = [
+                    { file: medCertFile, label: 'Medical Certificate' },
+                    { file: prescriptionFile, label: 'Prescription' },
+                    { file: receiptFile, label: 'Receipt' },
+                ].filter(d => d.file);
 
-            const formData = new FormData();
-            formData.append('chat_id', RECEIPT_GROUP_ID);
-            formData.append('photo', receiptFile);
-            formData.append('caption', caption);
+                if (docs.length > 0) {
+                    const caption = `[Cash Claim] ${mainMemberName} (ID: ${employeeId})\nBenefit: ${benefit.type}\nAmount: ${addedAmount}`;
+                    const formData = new FormData();
+                    formData.append('chat_id', RECEIPT_GROUP_ID);
 
-            // 1. Send photo to Telegram
-            const telegramResponse = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
-                method: 'POST',
-                body: formData
-            });
+                    const mediaArray = [];
+                    docs.forEach((doc, index) => {
+                        const attachName = `photo${index}`;
+                        formData.append(attachName, doc.file);
+                        mediaArray.push({
+                            type: 'photo',
+                            media: `attach://${attachName}`,
+                            // Only add the caption to the first image in the group
+                            caption: index === 0 ? caption + `\nIncludes: ${docs.map(d => d.label).join(', ')}` : undefined
+                        });
+                    });
 
-            if (!telegramResponse.ok) {
-                throw new Error('Failed to securely send photo payload.');
+                    formData.append('media', JSON.stringify(mediaArray));
+
+                    const tgRes = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMediaGroup`, { method: 'POST', body: formData });
+                    if (!tgRes.ok) throw new Error('Failed to send picture group to Telegram.');
+                } else {
+                    // No pictures uploaded, just send a text message
+                    const msg = `[Cash Claim] ${mainMemberName} (ID: ${employeeId})\nBenefit: ${benefit.type}\nAmount: ${addedAmount}\nNo documents uploaded.`;
+                    const formData = new FormData();
+                    formData.append('chat_id', RECEIPT_GROUP_ID);
+                    formData.append('text', msg);
+                    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { method: 'POST', body: formData });
+                }
+            } else {
+                // Credit: just send a text notification
+                const msg = `Credit claim submitted for ${mainMemberName} (Employee ID: ${employeeId})\nBenefit: ${benefit.type}\nAmount: ${addedAmount}\nPayment: Credit`;
+                const formData = new FormData();
+                formData.append('chat_id', RECEIPT_GROUP_ID);
+                formData.append('text', msg);
+                await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { method: 'POST', body: formData });
             }
 
-            // 2. Commit transaction to database via API
+            // Commit transaction to database
             const updateUrl = `${API_URL}/${employeeId}/benefits-used-amount`;
-            const requestBody = {
-                benefits: [{
-                    type: benefit.type,
-                    usedAmount: newAmount
-                }]
-            };
-
             const response = await fetch(updateUrl, {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(requestBody)
+                body: JSON.stringify({ benefits: [{ type: benefit.type, usedAmount: newAmount }] })
             });
-
             const result = await response.json();
 
             if (response.status === 200) {
                 const updatedPolicy = { ...policy };
                 updatedPolicy.benefits[selectedBenefitIndex].usedAmount = newAmount;
                 setPolicy(updatedPolicy);
-
                 resetUpdateState();
-                alert('Receipt has been successfully recorded in the system.');
+                alert('Claim has been successfully recorded in the system.');
             } else {
                 throw new Error(result.message || 'Failed to update benefit amount in the database.');
             }
-
         } catch (err) {
-            console.error('Error submitting receipt:', err);
+            console.error('Error submitting claim:', err);
             setError(`Failed to finalize submission: ${err.message}`);
         } finally {
             setUpdatingBenefit(false);
@@ -460,15 +505,23 @@ function App() {
                                                                 </td>
                                                                 <td className="p-4 text-right">
                                                                     <button
-                                                                        onClick={() => !awaitingReceiptPhoto && setSelectedBenefitIndex(isSelected ? null : i)}
-                                                                        disabled={awaitingReceiptPhoto}
+                                                                        onClick={() => !awaitingReceiptPhoto && !awaitingPaymentType && setSelectedBenefitIndex(isSelected ? null : i)}
+                                                                        disabled={awaitingReceiptPhoto || awaitingPaymentType || usedPercent >= 100}
+                                                                        title={usedPercent >= 100 ? 'Benefit fully utilized — no further claims allowed' : ''}
                                                                         className={`px-3 py-1.5 text-xs font-semibold rounded-sm transition-colors border flex items-center gap-1 ml-auto ${isSelected
                                                                             ? 'bg-[var(--accent-color)] border-[var(--accent-color)] text-white'
-                                                                            : 'bg-transparent border-[var(--border-color)] text-[var(--text-primary)] hover:border-[var(--accent-color)] disabled:opacity-50 disabled:cursor-not-allowed'
+                                                                            : usedPercent >= 100
+                                                                                ? 'bg-[var(--danger-bg)] border-[var(--danger-border)] text-[var(--danger)] cursor-not-allowed opacity-60'
+                                                                                : 'bg-transparent border-[var(--border-color)] text-[var(--text-primary)] hover:border-[var(--accent-color)] disabled:opacity-50 disabled:cursor-not-allowed'
                                                                             }`}
                                                                     >
-                                                                        <PlusCircle className="w-3 h-3" /> Process Claim
+                                                                        <PlusCircle className="w-3 h-3" /> {usedPercent >= 100 ? 'Limit Reached' : 'Process Claim'}
                                                                     </button>
+                                                                    {isHighUsage && usedPercent < 100 && (
+                                                                        <p className="text-[10px] text-[var(--danger)] mt-1 flex items-center justify-end gap-1">
+                                                                            <AlertTriangle className="w-3 h-3" /> 75%+ utilized — approaching limit
+                                                                        </p>
+                                                                    )}
                                                                 </td>
                                                             </tr>
 
@@ -476,74 +529,99 @@ function App() {
                                                                 <tr>
                                                                     <td colSpan="5" className="p-0 border-b-2 border-[var(--accent-color)]">
                                                                         <div className="bg-[var(--bg-primary)] p-6 animate-in slide-in-from-top-2 flex flex-col border-x border-[var(--border-color)]">
-                                                                            {/* Expanded Desktop Workflow form here, same as below but styled linearly */}
-                                                                            {!awaitingReceiptPhoto ? (
+                                                                            {!awaitingPaymentType && !awaitingReceiptPhoto ? (
                                                                                 <div className="w-full max-w-xl">
                                                                                     <h4 className="text-sm font-semibold uppercase tracking-wider text-[var(--text-secondary)] mb-4">Step 1: Input Claim Amount</h4>
+                                                                                    {isHighUsage && (
+                                                                                        <div className="mb-3 flex items-center gap-2 bg-[var(--danger-bg)] border border-[var(--danger-border)] text-[var(--danger)] rounded-sm px-3 py-2 text-xs font-semibold">
+                                                                                            <AlertTriangle className="w-4 h-4 flex-shrink-0" /> Warning: This benefit is at {Math.round(usedPercent)}% utilization.
+                                                                                        </div>
+                                                                                    )}
                                                                                     <form onSubmit={handleUpdateAmount} className="flex gap-4 items-end">
                                                                                         <div className="flex-1">
                                                                                             <label className="block text-xs font-semibold mb-1 text-[var(--text-primary)]">Amount to Process (Numeric)</label>
-                                                                                            <input
-                                                                                                type="number"
-                                                                                                step="0.01"
-                                                                                                min="0.01"
-                                                                                                required
-                                                                                                value={amountToAdd}
+                                                                                            <input type="number" step="0.01" min="0.01" required value={amountToAdd}
                                                                                                 onChange={(e) => setAmountToAdd(e.target.value)}
-                                                                                                className="w-full bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-sm py-2 px-3 focus:outline-none focus:border-[var(--accent-color)]"
-                                                                                            />
+                                                                                                className="w-full bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-sm py-2 px-3 focus:outline-none focus:border-[var(--accent-color)]" />
                                                                                         </div>
-                                                                                        <button
-                                                                                            type="submit"
-                                                                                            disabled={updatingBenefit}
-                                                                                            className="bg-[var(--text-primary)] hover:bg-[var(--accent-color)] text-[var(--bg-secondary)] font-semibold py-2 px-6 rounded-sm transition-colors h-[38px] flex items-center gap-2"
-                                                                                        >
+                                                                                        <button type="submit" disabled={updatingBenefit}
+                                                                                            className="bg-[var(--text-primary)] hover:bg-[var(--accent-color)] text-[var(--bg-secondary)] font-semibold py-2 px-6 rounded-sm transition-colors h-[38px] flex items-center gap-2">
                                                                                             {updatingBenefit ? 'Authorizing...' : 'Authorize'} <ArrowRight className="w-4 h-4" />
                                                                                         </button>
                                                                                     </form>
-                                                                                    <p className="text-xs text-[var(--danger)] mt-2 flex items-center gap-1">
+                                                                                    {amountError && (
+                                                                                        <p className="text-xs text-[var(--danger)] mt-2 font-semibold">
+                                                                                            {amountError}
+                                                                                        </p>
+                                                                                    )}
+                                                                                    <p className="text-xs text-[var(--text-secondary)] mt-2 flex items-center gap-1">
                                                                                         <AlertTriangle className="w-3 h-3" /> Once authorized, amount cannot be modified.
                                                                                     </p>
+                                                                                </div>
+                                                                            ) : awaitingPaymentType ? (
+                                                                                <div className="w-full max-w-xl">
+                                                                                    <h4 className="text-sm font-semibold uppercase tracking-wider text-[var(--success)] mb-1 flex items-center gap-1">
+                                                                                        <CheckCircle2 className="w-4 h-4" /> Step 1 Complete &middot; Step 2: Payment Type
+                                                                                    </h4>
+                                                                                    <p className="text-xs text-[var(--text-secondary)] mb-4">How is this claim being paid?</p>
+                                                                                    <div className="flex gap-3">
+                                                                                        <button onClick={() => handleSelectPaymentType('cash')}
+                                                                                            className="flex-1 border-2 border-[var(--accent-color)] bg-[var(--accent-color)]/10 hover:bg-[var(--accent-color)]/20 text-[var(--accent-color)] font-bold py-4 rounded-sm transition-colors text-sm">
+                                                                                            💵 Cash
+                                                                                        </button>
+                                                                                        <button onClick={() => handleSelectPaymentType('credit')}
+                                                                                            className="flex-1 border-2 border-[var(--border-color)] hover:border-[var(--accent-color)] text-[var(--text-primary)] font-bold py-4 rounded-sm transition-colors text-sm">
+                                                                                            💳 Credit
+                                                                                        </button>
+                                                                                    </div>
                                                                                 </div>
                                                                             ) : (
                                                                                 <div className="w-full">
                                                                                     <h4 className="text-sm font-semibold uppercase tracking-wider text-[var(--success)] mb-4 flex items-center gap-1">
-                                                                                        <CheckCircle2 className="w-4 h-4" /> Step 1 Complete &middot; Step 2: Upload Receipt
+                                                                                        <CheckCircle2 className="w-4 h-4" /> Step 2 Complete &middot; Step 3: {paymentType === 'cash' ? 'Upload Documents' : 'Confirm'}
                                                                                     </h4>
-
-                                                                                    {!awaitingConfirmation ? (
-                                                                                        <label className="border border-dashed border-[var(--accent-color)] bg-[var(--accent-color)]/5 hover:bg-[var(--accent-color)]/10 rounded-sm p-6 flex flex-col items-center justify-center cursor-pointer transition-colors max-w-xl">
-                                                                                            <Upload className="w-6 h-6 text-[var(--accent-color)] mb-2" />
-                                                                                            <span className="font-semibold text-sm text-[var(--accent-color)]">Select Receipt Document</span>
-                                                                                            <input
-                                                                                                type="file"
-                                                                                                accept="image/*"
-                                                                                                capture="environment"
-                                                                                                className="hidden"
-                                                                                                onChange={handleFileChange}
-                                                                                            />
-                                                                                        </label>
-                                                                                    ) : (
-                                                                                        <div className="flex gap-6 items-start">
-                                                                                            <div className="w-48 h-48 border border-[var(--border-color)] rounded-sm bg-[var(--bg-secondary)] flex items-center justify-center overflow-hidden">
-                                                                                                <img src={receiptPreview} alt="Receipt preview" className="max-w-full max-h-full object-contain" />
-                                                                                            </div>
-                                                                                            <div className="flex flex-col gap-3">
-                                                                                                <div className="text-sm font-semibold">Document Ready for Submission</div>
-                                                                                                <div className="text-xs text-[var(--text-secondary)] mb-2">Claim Amount: {addedAmount} <br /> Type: {b.type}</div>
-                                                                                                <button
-                                                                                                    onClick={submitReceipt}
-                                                                                                    disabled={updatingBenefit}
-                                                                                                    className="bg-[var(--success)] hover:bg-green-700 text-white font-semibold py-2 px-6 rounded-sm transition-colors text-sm flex items-center justify-center gap-2"
-                                                                                                >
+                                                                                    {paymentType === 'cash' ? (
+                                                                                        <div className="space-y-4 max-w-2xl">
+                                                                                            <p className="text-xs text-[var(--text-secondary)]">All documents are optional. Upload whichever you have.</p>
+                                                                                            {[
+                                                                                                { label: 'Medical Certificate', file: medCertFile, preview: medCertPreview, setter: setMedCertFile, previewSetter: setMedCertPreview },
+                                                                                                { label: 'Prescription', file: prescriptionFile, preview: prescriptionPreview, setter: setPrescriptionFile, previewSetter: setPrescriptionPreview },
+                                                                                                { label: 'Receipt', file: receiptFile, preview: receiptPreview, setter: setReceiptFile, previewSetter: setReceiptPreview },
+                                                                                            ].map(doc => (
+                                                                                                <div key={doc.label} className="flex items-center gap-4">
+                                                                                                    <label className="flex-1 border border-dashed border-[var(--accent-color)] bg-[var(--accent-color)]/5 hover:bg-[var(--accent-color)]/10 rounded-sm p-3 flex items-center gap-3 cursor-pointer transition-colors">
+                                                                                                        {doc.preview
+                                                                                                            ? <img src={doc.preview} alt={doc.label} className="w-10 h-10 object-cover rounded-sm border border-[var(--border-color)]" />
+                                                                                                            : <Upload className="w-5 h-5 text-[var(--accent-color)]" />}
+                                                                                                        <span className="text-xs font-semibold text-[var(--accent-color)]">{doc.preview ? `✓ ${doc.label}` : doc.label}</span>
+                                                                                                        <input type="file" accept="image/*" capture="environment" className="hidden"
+                                                                                                            onChange={handleFileChange(doc.setter, doc.previewSetter)} />
+                                                                                                    </label>
+                                                                                                </div>
+                                                                                            ))}
+                                                                                            <div className="flex gap-3 pt-2">
+                                                                                                <button onClick={submitClaim} disabled={updatingBenefit}
+                                                                                                    className="bg-[var(--success)] hover:bg-green-700 text-white font-semibold py-2 px-6 rounded-sm transition-colors text-sm flex items-center gap-2">
                                                                                                     {updatingBenefit ? 'Transmitting...' : 'Submit to System'}
                                                                                                 </button>
-                                                                                                <button
-                                                                                                    onClick={cancelReceipt}
-                                                                                                    disabled={updatingBenefit}
-                                                                                                    className="bg-transparent border border-[var(--danger)] text-[var(--danger)] hover:bg-[var(--danger-bg)] font-semibold py-2 px-6 rounded-sm transition-colors text-sm"
-                                                                                                >
-                                                                                                    Void Submission
+                                                                                                <button onClick={resetUpdateState} disabled={updatingBenefit}
+                                                                                                    className="border border-[var(--danger)] text-[var(--danger)] hover:bg-[var(--danger-bg)] font-semibold py-2 px-6 rounded-sm transition-colors text-sm">
+                                                                                                    Void
+                                                                                                </button>
+                                                                                            </div>
+                                                                                        </div>
+                                                                                    ) : (
+                                                                                        <div className="flex flex-col gap-3 max-w-sm">
+                                                                                            <p className="text-sm text-[var(--text-secondary)]">Credit payment — no documents required.</p>
+                                                                                            <div className="text-xs text-[var(--text-secondary)]">Claim Amount: <strong>{addedAmount}</strong> &bull; Type: <strong>{b.type}</strong></div>
+                                                                                            <div className="flex gap-3">
+                                                                                                <button onClick={submitClaim} disabled={updatingBenefit}
+                                                                                                    className="bg-[var(--success)] hover:bg-green-700 text-white font-semibold py-2 px-6 rounded-sm transition-colors text-sm flex items-center gap-2">
+                                                                                                    {updatingBenefit ? 'Transmitting...' : 'Submit to System'}
+                                                                                                </button>
+                                                                                                <button onClick={resetUpdateState} disabled={updatingBenefit}
+                                                                                                    className="border border-[var(--danger)] text-[var(--danger)] hover:bg-[var(--danger-bg)] font-semibold py-2 px-6 rounded-sm transition-colors text-sm">
+                                                                                                    Void
                                                                                                 </button>
                                                                                             </div>
                                                                                         </div>
@@ -590,66 +668,102 @@ function App() {
                                                     </div>
 
                                                     <button
-                                                        onClick={() => !awaitingReceiptPhoto && setSelectedBenefitIndex(isSelected ? null : i)}
-                                                        disabled={awaitingReceiptPhoto}
+                                                        onClick={() => !awaitingReceiptPhoto && !awaitingPaymentType && setSelectedBenefitIndex(isSelected ? null : i)}
+                                                        disabled={awaitingReceiptPhoto || awaitingPaymentType || usedPercent >= 100}
                                                         className={`w-full py-2.5 text-sm font-semibold rounded-sm transition-colors border flex items-center justify-center gap-2 ${isSelected
                                                             ? 'bg-[var(--accent-color)] border-[var(--accent-color)] text-white'
-                                                            : 'bg-transparent border-[var(--border-color)] text-[var(--text-primary)] hover:border-[var(--accent-color)] disabled:opacity-50 disabled:cursor-not-allowed'
+                                                            : usedPercent >= 100
+                                                                ? 'bg-[var(--danger-bg)] border-[var(--danger-border)] text-[var(--danger)] cursor-not-allowed opacity-60'
+                                                                : 'bg-transparent border-[var(--border-color)] text-[var(--text-primary)] hover:border-[var(--accent-color)] disabled:opacity-50 disabled:cursor-not-allowed'
                                                             }`}
                                                     >
-                                                        <PlusCircle className="w-4 h-4" /> {isSelected ? 'Cancel Action' : 'Process Claim'}
+                                                        <PlusCircle className="w-4 h-4" /> {usedPercent >= 100 ? 'Limit Reached' : isSelected ? 'Cancel Action' : 'Process Claim'}
                                                     </button>
+                                                    {isHighUsage && usedPercent < 100 && (
+                                                        <p className="text-xs text-[var(--danger)] mt-1 flex items-center gap-1">
+                                                            <AlertTriangle className="w-3 h-3" /> 75%+ utilized — approaching limit
+                                                        </p>
+                                                    )}
 
                                                     {isSelected && (
                                                         <div className="mt-4 pt-4 border-t-2 border-[var(--accent-color)]">
-                                                            {!awaitingReceiptPhoto ? (
+                                                            {!awaitingPaymentType && !awaitingReceiptPhoto ? (
                                                                 <form onSubmit={handleUpdateAmount} className="flex flex-col gap-3">
+                                                                    {isHighUsage && (
+                                                                        <div className="flex items-center gap-2 bg-[var(--danger-bg)] border border-[var(--danger-border)] text-[var(--danger)] rounded-sm px-3 py-2 text-xs font-semibold">
+                                                                            <AlertTriangle className="w-3 h-3" /> Warning: {Math.round(usedPercent)}% utilized
+                                                                        </div>
+                                                                    )}
                                                                     <div>
                                                                         <label className="text-xs font-semibold text-[var(--text-primary)] block mb-1">Amount to Process</label>
-                                                                        <input
-                                                                            type="number"
-                                                                            step="0.01"
-                                                                            min="0.01"
-                                                                            required
-                                                                            value={amountToAdd}
+                                                                        <input type="number" step="0.01" min="0.01" required value={amountToAdd}
                                                                             onChange={(e) => setAmountToAdd(e.target.value)}
-                                                                            className="w-full bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-sm py-3 px-3 focus:outline-none focus:border-[var(--accent-color)] text-[var(--text-primary)]"
-                                                                        />
+                                                                            className="w-full bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-sm py-3 px-3 focus:outline-none focus:border-[var(--accent-color)] text-[var(--text-primary)]" />
                                                                     </div>
-                                                                    <button
-                                                                        type="submit"
-                                                                        disabled={updatingBenefit}
-                                                                        className="w-full bg-[var(--text-primary)] hover:bg-[var(--accent-color)] text-[var(--bg-secondary)] flex items-center justify-center gap-2 font-semibold py-3 rounded-sm transition-colors"
-                                                                    >
+                                                                    <button type="submit" disabled={updatingBenefit}
+                                                                        className="w-full bg-[var(--text-primary)] hover:bg-[var(--accent-color)] text-[var(--bg-secondary)] flex items-center justify-center gap-2 font-semibold py-3 rounded-sm transition-colors">
                                                                         {updatingBenefit ? 'Authorizing...' : 'Authorize Request'} <ArrowRight className="w-4 h-4" />
                                                                     </button>
-                                                                    <p className="text-xs text-[var(--danger)] text-center flex items-center justify-center gap-1">
+                                                                    {amountError && (
+                                                                        <p className="text-xs text-[var(--danger)] text-center font-semibold">
+                                                                            {amountError}
+                                                                        </p>
+                                                                    )}
+                                                                    <p className="text-[11px] text-[var(--text-secondary)] text-center flex items-center justify-center gap-1">
                                                                         <AlertTriangle className="w-3 h-3" /> Cannot be undone
                                                                     </p>
                                                                 </form>
-                                                            ) : (
-                                                                <div className="flex flex-col gap-3 text-center">
-                                                                    <h4 className="text-xs font-semibold uppercase text-[var(--success)] flex items-center justify-center gap-1 mb-2">
-                                                                        <CheckCircle2 className="w-3 h-3" /> Step 1 Complete
+                                                            ) : awaitingPaymentType ? (
+                                                                <div className="flex flex-col gap-3">
+                                                                    <h4 className="text-xs font-semibold uppercase text-[var(--success)] flex items-center gap-1">
+                                                                        <CheckCircle2 className="w-3 h-3" /> Step 1 Complete — Payment Type
                                                                     </h4>
-                                                                    {!awaitingConfirmation ? (
-                                                                        <label className="w-full border border-dashed border-[var(--accent-color)] bg-[var(--accent-color)]/5 hover:bg-[var(--accent-color)]/10 rounded-sm py-10 flex flex-col items-center justify-center cursor-pointer transition-colors">
-                                                                            <Upload className="w-8 h-8 text-[var(--accent-color)] mb-3" />
-                                                                            <span className="font-semibold text-base text-[var(--accent-color)]">Upload Receipt</span>
-                                                                            <span className="text-xs mt-1 text-[var(--text-secondary)]">Tap to select from device</span>
-                                                                            <input type="file" accept="image/*" capture="environment" className="hidden" onChange={handleFileChange} />
-                                                                        </label>
-                                                                    ) : (
+                                                                    <p className="text-xs text-[var(--text-secondary)]">How is this claim being paid?</p>
+                                                                    <div className="flex gap-3">
+                                                                        <button onClick={() => handleSelectPaymentType('cash')}
+                                                                            className="flex-1 border-2 border-[var(--accent-color)] bg-[var(--accent-color)]/10 text-[var(--accent-color)] font-bold py-3 rounded-sm text-sm">
+                                                                            💵 Cash
+                                                                        </button>
+                                                                        <button onClick={() => handleSelectPaymentType('credit')}
+                                                                            className="flex-1 border-2 border-[var(--border-color)] text-[var(--text-primary)] font-bold py-3 rounded-sm text-sm">
+                                                                            💳 Credit
+                                                                        </button>
+                                                                    </div>
+                                                                </div>
+                                                            ) : (
+                                                                <div className="flex flex-col gap-3">
+                                                                    <h4 className="text-xs font-semibold uppercase text-[var(--success)] flex items-center justify-center gap-1">
+                                                                        <CheckCircle2 className="w-3 h-3" /> {paymentType === 'cash' ? 'Upload Documents (Optional)' : 'Confirm Credit Claim'}
+                                                                    </h4>
+                                                                    {paymentType === 'cash' ? (
                                                                         <>
-                                                                            <img src={receiptPreview} alt="Receipt preview" className="w-full h-auto max-h-48 object-contain bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-sm p-2 mb-2" />
-                                                                            <button onClick={submitReceipt} disabled={updatingBenefit} className="w-full bg-[var(--success)] hover:bg-green-700 text-white font-semibold py-3 rounded-sm transition-colors text-sm">
-                                                                                {updatingBenefit ? 'Transmitting...' : 'Submit Final Receipt'}
-                                                                            </button>
-                                                                            <button onClick={cancelReceipt} disabled={updatingBenefit} className="w-full border border-[var(--danger)] text-[var(--danger)] hover:bg-[var(--danger-bg)] font-semibold py-3 rounded-sm transition-colors text-sm">
-                                                                                Void Submission
-                                                                            </button>
+                                                                            <p className="text-xs text-[var(--text-secondary)] text-center">All documents are optional.</p>
+                                                                            {[
+                                                                                { label: 'Medical Certificate', file: medCertFile, preview: medCertPreview, setter: setMedCertFile, previewSetter: setMedCertPreview },
+                                                                                { label: 'Prescription', file: prescriptionFile, preview: prescriptionPreview, setter: setPrescriptionFile, previewSetter: setPrescriptionPreview },
+                                                                                { label: 'Receipt', file: receiptFile, preview: receiptPreview, setter: setReceiptFile, previewSetter: setReceiptPreview },
+                                                                            ].map(doc => (
+                                                                                <label key={doc.label} className="w-full border border-dashed border-[var(--accent-color)] bg-[var(--accent-color)]/5 hover:bg-[var(--accent-color)]/10 rounded-sm py-3 px-4 flex items-center gap-3 cursor-pointer transition-colors">
+                                                                                    {doc.preview
+                                                                                        ? <img src={doc.preview} alt={doc.label} className="w-8 h-8 object-cover rounded-sm border border-[var(--border-color)]" />
+                                                                                        : <Upload className="w-5 h-5 text-[var(--accent-color)]" />}
+                                                                                    <span className="text-xs font-semibold text-[var(--accent-color)]">{doc.preview ? `✓ ${doc.label}` : doc.label}</span>
+                                                                                    <input type="file" accept="image/*" capture="environment" className="hidden"
+                                                                                        onChange={handleFileChange(doc.setter, doc.previewSetter)} />
+                                                                                </label>
+                                                                            ))}
                                                                         </>
+                                                                    ) : (
+                                                                        <p className="text-xs text-[var(--text-secondary)] text-center">Credit payment — no documents required.</p>
                                                                     )}
+                                                                    <button onClick={submitClaim} disabled={updatingBenefit}
+                                                                        className="w-full bg-[var(--success)] hover:bg-green-700 text-white font-semibold py-3 rounded-sm transition-colors text-sm">
+                                                                        {updatingBenefit ? 'Transmitting...' : 'Submit to System'}
+                                                                    </button>
+                                                                    <button onClick={resetUpdateState} disabled={updatingBenefit}
+                                                                        className="w-full border border-[var(--danger)] text-[var(--danger)] hover:bg-[var(--danger-bg)] font-semibold py-3 rounded-sm transition-colors text-sm">
+                                                                        Void
+                                                                    </button>
                                                                 </div>
                                                             )}
                                                         </div>
