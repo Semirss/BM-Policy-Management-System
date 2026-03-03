@@ -22,6 +22,26 @@ const API_URL = import.meta.env.VITE_API_URL || '/personal-accidents';
 const BOT_TOKEN = import.meta.env.VITE_BOT_TOKEN;
 const RECEIPT_GROUP_ID = import.meta.env.VITE_RECEIPT_GROUP_ID;
 
+// Canonical display order for benefits
+const BENEFIT_ORDER = [
+    'Basic Medical Cover',
+    'Dental',
+    'Optical',
+    'Maternity',
+    'Checkup',
+];
+
+const sortBenefits = (benefits) => {
+    if (!benefits) return benefits;
+    return [...benefits].sort((a, b) => {
+        const ai = BENEFIT_ORDER.findIndex(name => a.type?.toLowerCase().includes(name.toLowerCase()));
+        const bi = BENEFIT_ORDER.findIndex(name => b.type?.toLowerCase().includes(name.toLowerCase()));
+        const aIdx = ai === -1 ? BENEFIT_ORDER.length : ai;
+        const bIdx = bi === -1 ? BENEFIT_ORDER.length : bi;
+        return aIdx - bIdx;
+    });
+};
+
 function App() {
     const [employeeId, setEmployeeId] = useState('');
     const [loading, setLoading] = useState(false);
@@ -103,7 +123,9 @@ function App() {
             if (!foundPolicy) {
                 setError('No policy found for this Employee ID.');
             } else {
-                setPolicy(foundPolicy);
+                // Sort benefits into the canonical display order
+                const sorted = { ...foundPolicy, benefits: sortBenefits(foundPolicy.benefits) };
+                setPolicy(sorted);
             }
         } catch (err) {
             console.error(err);
