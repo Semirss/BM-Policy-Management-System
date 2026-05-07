@@ -24,7 +24,7 @@ const RECEIPT_GROUP_ID = import.meta.env.VITE_RECEIPT_GROUP_ID;
 
 // Canonical display order for benefits
 const BENEFIT_ORDER = [
-    'Basic Medical Cover',
+    'Basic Cover',
     'Dental',
     'Optical',
     'Maternity',
@@ -70,12 +70,9 @@ function App() {
     const [addedAmount, setAddedAmount] = useState(0);
 
     // Cash documents (all optional)
-    const [medCertFile, setMedCertFile] = useState(null);
-    const [medCertPreview, setMedCertPreview] = useState(null);
-    const [prescriptionFile, setPrescriptionFile] = useState(null);
-    const [prescriptionPreview, setPrescriptionPreview] = useState(null);
-    const [receiptFile, setReceiptFile] = useState(null);
-    const [receiptPreview, setReceiptPreview] = useState(null);
+    const [medCertFiles, setMedCertFiles] = useState([]);
+    const [prescriptionFiles, setPrescriptionFiles] = useState([]);
+    const [receiptFiles, setReceiptFiles] = useState([]);
 
     // Track which history images have been loaded. Values: 'loading', 'loaded', or undefined
     const [loadedReceipts, setLoadedReceipts] = useState({});
@@ -142,9 +139,9 @@ function App() {
         setPaymentType(null);
         setAwaitingPaymentType(false);
         setAwaitingReceiptPhoto(false);
-        setMedCertFile(null); setMedCertPreview(null);
-        setPrescriptionFile(null); setPrescriptionPreview(null);
-        setReceiptFile(null); setReceiptPreview(null);
+        setMedCertFiles([]);
+        setPrescriptionFiles([]);
+        setReceiptFiles([]);
         setAwaitingConfirmation(false);
         setAddedAmount(0);
     };
@@ -180,12 +177,20 @@ function App() {
         setAwaitingReceiptPhoto(true);
     };
 
-    const handleFileChange = (setter, previewSetter) => (e) => {
-        const file = e.target.files[0];
-        if (file) {
-            setter(file);
-            previewSetter(URL.createObjectURL(file));
+    const handleFileChange = (setter) => (e) => {
+        if (e.target.files && e.target.files.length > 0) {
+            const newFiles = Array.from(e.target.files).map(file => ({
+                file,
+                preview: URL.createObjectURL(file)
+            }));
+            setter(prev => [...prev, ...newFiles]);
+            // Reset input so the same file can be selected again if removed
+            e.target.value = '';
         }
+    };
+
+    const removeFile = (setter, indexToRemove) => {
+        setter(prev => prev.filter((_, idx) => idx !== indexToRemove));
     };
 
     const submitClaim = async () => {
@@ -201,33 +206,36 @@ function App() {
 
             // For cash payments, send each document that was uploaded (all optional)
             if (paymentType === 'cash') {
-                const docs = [
-                    { file: medCertFile, label: 'Medical Certificate' },
-                    { file: prescriptionFile, label: 'Prescription' },
-                    { file: receiptFile, label: 'Receipt' },
-                ].filter(d => d.file);
+                const allFiles = [
+                    ...medCertFiles.map(f => ({ ...f, label: 'Medical Certificate' })),
+                    ...prescriptionFiles.map(f => ({ ...f, label: 'Prescription' })),
+                    ...receiptFiles.map(f => ({ ...f, label: 'Receipt' }))
+                ];
 
-                if (docs.length > 0) {
-                    const caption = `[Cash Claim] ${mainMemberName} (ID: ${employeeId})\nBenefit: ${benefit.type}\nAmount: ${addedAmount}`;
-                    const formData = new FormData();
-                    formData.append('chat_id', RECEIPT_GROUP_ID);
+                if (allFiles.length > 0) {
+                    const caption = `[Cash Claim] ${mainMemberName} (ID: ${employeeId})\nBenefit: ${benefit.type}\nAmount: ${addedAmount}\nIncludes: ${Array.from(new Set(allFiles.map(f => f.label))).join(', ')}`;
+                    
+                    // Telegram allows max 10 media per group. Chunk if necessary.
+                    const CHUNK_SIZE = 10;
+                    for (let i = 0; i < allFiles.length; i += CHUNK_SIZE) {
+                        const chunk = allFiles.slice(i, i + CHUNK_SIZE);
+                        const formData = new FormData();
+                        formData.append('chat_id', RECEIPT_GROUP_ID);
 
-                    const mediaArray = [];
-                    docs.forEach((doc, index) => {
-                        const attachName = `photo${index}`;
-                        formData.append(attachName, doc.file);
-                        mediaArray.push({
-                            type: 'photo',
-                            media: `attach://${attachName}`,
-                            // Only add the caption to the first image in the group
-                            caption: index === 0 ? caption + `\nIncludes: ${docs.map(d => d.label).join(', ')}` : undefined
+                        const mediaArray = chunk.map((doc, index) => {
+                            const attachName = `photo${index}`;
+                            formData.append(attachName, doc.file);
+                            return {
+                                type: 'photo',
+                                media: `attach://${attachName}`,
+                                caption: (i === 0 && index === 0) ? caption : undefined
+                            };
                         });
-                    });
 
-                    formData.append('media', JSON.stringify(mediaArray));
-
-                    const tgRes = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMediaGroup`, { method: 'POST', body: formData });
-                    if (!tgRes.ok) throw new Error('Failed to send picture group to Telegram.');
+                        formData.append('media', JSON.stringify(mediaArray));
+                        const tgRes = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMediaGroup`, { method: 'POST', body: formData });
+                        if (!tgRes.ok) throw new Error('Failed to send picture group to Telegram.');
+                    }
                 } else {
                     // No pictures uploaded, just send a text message
                     const msg = `[Cash Claim] ${mainMemberName} (ID: ${employeeId})\nBenefit: ${benefit.type}\nAmount: ${addedAmount}\nNo documents uploaded.`;
@@ -604,21 +612,36 @@ function App() {
                                                                                     </h4>
                                                                                     {paymentType === 'cash' ? (
                                                                                         <div className="space-y-4 max-w-2xl">
-                                                                                            <p className="text-xs text-[var(--text-secondary)]">All documents are optional. Upload whichever you have.</p>
+                                                                                            <p className="text-xs text-[var(--text-secondary)]">All documents are optional. You can upload multiple images per category.</p>
                                                                                             {[
-                                                                                                { label: 'Medical Certificate', file: medCertFile, preview: medCertPreview, setter: setMedCertFile, previewSetter: setMedCertPreview },
-                                                                                                { label: 'Prescription', file: prescriptionFile, preview: prescriptionPreview, setter: setPrescriptionFile, previewSetter: setPrescriptionPreview },
-                                                                                                { label: 'Receipt', file: receiptFile, preview: receiptPreview, setter: setReceiptFile, previewSetter: setReceiptPreview },
+                                                                                                { label: 'Medical Certificate', files: medCertFiles, setter: setMedCertFiles },
+                                                                                                { label: 'Prescription', files: prescriptionFiles, setter: setPrescriptionFiles },
+                                                                                                { label: 'Receipt', files: receiptFiles, setter: setReceiptFiles },
                                                                                             ].map(doc => (
-                                                                                                <div key={doc.label} className="flex items-center gap-4">
-                                                                                                    <label className="flex-1 border border-dashed border-[var(--accent-color)] bg-[var(--accent-color)]/5 hover:bg-[var(--accent-color)]/10 rounded-sm p-3 flex items-center gap-3 cursor-pointer transition-colors">
-                                                                                                        {doc.preview
-                                                                                                            ? <img src={doc.preview} alt={doc.label} className="w-10 h-10 object-cover rounded-sm border border-[var(--border-color)]" />
-                                                                                                            : <Upload className="w-5 h-5 text-[var(--accent-color)]" />}
-                                                                                                        <span className="text-xs font-semibold text-[var(--accent-color)]">{doc.preview ? `✓ ${doc.label}` : doc.label}</span>
-                                                                                                        <input type="file" accept="image/*" capture="environment" className="hidden"
-                                                                                                            onChange={handleFileChange(doc.setter, doc.previewSetter)} />
-                                                                                                    </label>
+                                                                                                <div key={doc.label} className="border border-dashed border-[var(--accent-color)] bg-[var(--accent-color)]/5 rounded-sm p-3">
+                                                                                                    <div className="flex items-center justify-between mb-2">
+                                                                                                        <span className="text-xs font-semibold text-[var(--accent-color)]">{doc.label}{doc.files.length > 0 ? ` (${doc.files.length})` : ''}</span>
+                                                                                                        <label className="cursor-pointer flex items-center gap-1 text-xs font-semibold text-[var(--accent-color)] hover:underline">
+                                                                                                            <Upload className="w-3.5 h-3.5" /> Add Images
+                                                                                                            <input type="file" accept="image/*" multiple className="hidden"
+                                                                                                                onChange={handleFileChange(doc.setter)} />
+                                                                                                        </label>
+                                                                                                    </div>
+                                                                                                    {doc.files.length > 0 ? (
+                                                                                                        <div className="flex flex-wrap gap-2">
+                                                                                                            {doc.files.map((f, idx) => (
+                                                                                                                <div key={idx} className="relative group">
+                                                                                                                    <img src={f.preview} alt={`${doc.label} ${idx + 1}`} className="w-16 h-16 object-cover rounded-sm border border-[var(--border-color)]" />
+                                                                                                                    <button type="button" onClick={() => removeFile(doc.setter, idx)}
+                                                                                                                        className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-[var(--danger)] text-white rounded-full text-[10px] leading-none flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                                                                                                                        ×
+                                                                                                                    </button>
+                                                                                                                </div>
+                                                                                                            ))}
+                                                                                                        </div>
+                                                                                                    ) : (
+                                                                                                        <p className="text-[11px] text-[var(--text-secondary)] italic">No images selected yet</p>
+                                                                                                    )}
                                                                                                 </div>
                                                                                             ))}
                                                                                             <div className="flex gap-3 pt-2">
@@ -759,20 +782,37 @@ function App() {
                                                                     </h4>
                                                                     {paymentType === 'cash' ? (
                                                                         <>
-                                                                            <p className="text-xs text-[var(--text-secondary)] text-center">All documents are optional.</p>
+                                                                            <p className="text-xs text-[var(--text-secondary)] text-center">All documents are optional. Upload multiple images.</p>
                                                                             {[
-                                                                                { label: 'Medical Certificate', file: medCertFile, preview: medCertPreview, setter: setMedCertFile, previewSetter: setMedCertPreview },
-                                                                                { label: 'Prescription', file: prescriptionFile, preview: prescriptionPreview, setter: setPrescriptionFile, previewSetter: setPrescriptionPreview },
-                                                                                { label: 'Receipt', file: receiptFile, preview: receiptPreview, setter: setReceiptFile, previewSetter: setReceiptPreview },
+                                                                                { label: 'Medical Certificate', files: medCertFiles, setter: setMedCertFiles },
+                                                                                { label: 'Prescription', files: prescriptionFiles, setter: setPrescriptionFiles },
+                                                                                { label: 'Receipt', files: receiptFiles, setter: setReceiptFiles },
                                                                             ].map(doc => (
-                                                                                <label key={doc.label} className="w-full border border-dashed border-[var(--accent-color)] bg-[var(--accent-color)]/5 hover:bg-[var(--accent-color)]/10 rounded-sm py-3 px-4 flex items-center gap-3 cursor-pointer transition-colors">
-                                                                                    {doc.preview
-                                                                                        ? <img src={doc.preview} alt={doc.label} className="w-8 h-8 object-cover rounded-sm border border-[var(--border-color)]" />
-                                                                                        : <Upload className="w-5 h-5 text-[var(--accent-color)]" />}
-                                                                                    <span className="text-xs font-semibold text-[var(--accent-color)]">{doc.preview ? `✓ ${doc.label}` : doc.label}</span>
-                                                                                    <input type="file" accept="image/*" capture="environment" className="hidden"
-                                                                                        onChange={handleFileChange(doc.setter, doc.previewSetter)} />
-                                                                                </label>
+                                                                                <div key={doc.label} className="w-full border border-dashed border-[var(--accent-color)] bg-[var(--accent-color)]/5 rounded-sm p-3">
+                                                                                    <div className="flex items-center justify-between mb-2">
+                                                                                        <span className="text-xs font-semibold text-[var(--accent-color)]">{doc.label}{doc.files.length > 0 ? ` (${doc.files.length})` : ''}</span>
+                                                                                        <label className="cursor-pointer flex items-center gap-1 text-xs font-semibold text-[var(--accent-color)] hover:underline">
+                                                                                            <Upload className="w-3.5 h-3.5" /> Add Images
+                                                                                            <input type="file" accept="image/*" multiple className="hidden"
+                                                                                                onChange={handleFileChange(doc.setter)} />
+                                                                                        </label>
+                                                                                    </div>
+                                                                                    {doc.files.length > 0 ? (
+                                                                                        <div className="flex flex-wrap gap-2">
+                                                                                            {doc.files.map((f, idx) => (
+                                                                                                <div key={idx} className="relative group">
+                                                                                                    <img src={f.preview} alt={`${doc.label} ${idx + 1}`} className="w-12 h-12 object-cover rounded-sm border border-[var(--border-color)]" />
+                                                                                                    <button type="button" onClick={() => removeFile(doc.setter, idx)}
+                                                                                                        className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-[var(--danger)] text-white rounded-full text-[10px] leading-none flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                                                                                                        ×
+                                                                                                    </button>
+                                                                                                </div>
+                                                                                            ))}
+                                                                                        </div>
+                                                                                    ) : (
+                                                                                        <p className="text-[11px] text-[var(--text-secondary)] italic">No images selected yet</p>
+                                                                                    )}
+                                                                                </div>
                                                                             ))}
                                                                         </>
                                                                     ) : (
@@ -822,7 +862,7 @@ function App() {
                                                         <th className="p-4 font-semibold">Benefit Category</th>
                                                         <th className="p-4 font-semibold">Amount</th>
                                                         <th className="p-4 font-semibold">Status</th>
-                                                        <th className="p-4 text-xs font-normal text-[var(--text-secondary)] whitespace-nowrap">*Images routed to Telegram</th>
+                                                        <th className="p-4 text-xs font-normal text-[var(--text-secondary)] whitespace-nowrap">*Images routed to Admin</th>
                                                     </tr>
                                                 </thead>
                                                 <tbody className="divide-y divide-[var(--border-color)]">
