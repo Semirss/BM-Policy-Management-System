@@ -31,11 +31,12 @@ const BENEFIT_ORDER = [
     'Checkup',
 ];
 
+
 const sortBenefits = (benefits) => {
     if (!benefits) return benefits;
     return [...benefits].sort((a, b) => {
-        const ai = BENEFIT_ORDER.findIndex(name => a.type?.toLowerCase().includes(name.toLowerCase()));
-        const bi = BENEFIT_ORDER.findIndex(name => b.type?.toLowerCase().includes(name.toLowerCase()));
+        const ai = BENEFIT_ORDER.findIndex(name => a.type?.toUpperCase().includes(name.toUpperCase()));
+        const bi = BENEFIT_ORDER.findIndex(name => b.type?.toUpperCase().includes(name.toUpperCase()));
         const aIdx = ai === -1 ? BENEFIT_ORDER.length : ai;
         const bIdx = bi === -1 ? BENEFIT_ORDER.length : bi;
         return aIdx - bIdx;
@@ -56,6 +57,8 @@ function App() {
 
     // Benefit update state
     const [selectedBenefitIndex, setSelectedBenefitIndex] = useState(null);
+    const [rolloverBenefitIndex, setRolloverBenefitIndex] = useState(null);
+    const [activeFundingIndex, setActiveFundingIndex] = useState(null);
     const [amountToAdd, setAmountToAdd] = useState('');
     const [updatingBenefit, setUpdatingBenefit] = useState(false);
 
@@ -134,6 +137,8 @@ function App() {
 
     const resetUpdateState = () => {
         setSelectedBenefitIndex(null);
+        setRolloverBenefitIndex(null);
+        setActiveFundingIndex(null);
         setAmountToAdd('');
         setAmountError(null);
         setPaymentType(null);
@@ -156,18 +161,25 @@ function App() {
             return;
         }
 
-        // Check if adding this amount would exceed 100%
-        const benefit = policy.benefits[selectedBenefitIndex];
-        const usedAmount = parseFloat(benefit.usedAmount) || 0;
-        const totalAmount = parseFloat(benefit.amount) || 1;
-        if (usedAmount + amount > totalAmount) {
-            setAmountError(`Cannot process. This claim amount (${amount.toFixed(2)}) exceeds the remaining maximum limit for this benefit.`);
+        const rIndex = rolloverBenefitIndex !== null ? rolloverBenefitIndex : selectedBenefitIndex;
+        const rBenefit = policy.benefits[rIndex];
+        const rUsedAmount = parseFloat(rBenefit.usedAmount) || 0;
+        const rTotalAmount = parseFloat(rBenefit.amount) || 1;
+        const rRemaining = rTotalAmount - rUsedAmount;
+
+        if (amount > rRemaining) {
+            if (!policy.rollover || rIndex === selectedBenefitIndex) {
+                setAmountError(`Cannot process. This claim amount (${amount.toFixed(2)}) exceeds the remaining maximum limit for this benefit.`);
+            } else {
+                setAmountError(`The selected rollover benefit (${rBenefit.type}) does not have enough balance (${rRemaining.toFixed(2)} remaining).`);
+            }
             return;
         }
 
         setAmountError(null);
         setError(null);
         setAddedAmount(amount);
+        setActiveFundingIndex(rIndex);
         setAwaitingPaymentType(true);
     };
 
@@ -194,17 +206,19 @@ function App() {
     };
 
     const submitClaim = async () => {
-        if (selectedBenefitIndex === null || !addedAmount) return;
+        if (activeFundingIndex === null || !addedAmount) return;
 
         setUpdatingBenefit(true);
         setError(null);
 
         try {
-            const benefit = policy.benefits[selectedBenefitIndex];
+            const benefit = policy.benefits[activeFundingIndex];
+            const originalBenefit = policy.benefits[selectedBenefitIndex];
             const newAmount = parseFloat(benefit.usedAmount) + addedAmount;
             const mainMemberName = policy.mainMembers?.[0]?.name || 'Unknown';
+            const rolloverText = activeFundingIndex !== selectedBenefitIndex ? ` (Rolled over from ${benefit.type})` : '';
 
-            // For cash payments, send each document that was uploaded (all optional)
+            // For cash payments, send each document that was uploaded
             if (paymentType === 'cash') {
                 const allFiles = [
                     ...medCertFiles.map(f => ({ ...f, label: 'Medical Certificate' })),
@@ -213,7 +227,7 @@ function App() {
                 ];
 
                 if (allFiles.length > 0) {
-                    const caption = `[Cash Claim] ${mainMemberName} (ID: ${employeeId})\nBenefit: ${benefit.type}\nAmount: ${addedAmount}\nIncludes: ${Array.from(new Set(allFiles.map(f => f.label))).join(', ')}`;
+                    const caption = `[Cash Claim] ${mainMemberName} (ID: ${employeeId})\nClaim For: ${originalBenefit.type}${rolloverText}\nAmount: ${addedAmount}\nIncludes: ${Array.from(new Set(allFiles.map(f => f.label))).join(', ')}`;
                     
                     // Telegram allows max 10 media per group. Chunk if necessary.
                     const CHUNK_SIZE = 10;
@@ -238,7 +252,7 @@ function App() {
                     }
                 } else {
                     // No pictures uploaded, just send a text message
-                    const msg = `[Cash Claim] ${mainMemberName} (ID: ${employeeId})\nBenefit: ${benefit.type}\nAmount: ${addedAmount}\nNo documents uploaded.`;
+                    const msg = `[Cash Claim] ${mainMemberName} (ID: ${employeeId})\nClaim For: ${originalBenefit.type}${rolloverText}\nAmount: ${addedAmount}\nNo documents uploaded.`;
                     const formData = new FormData();
                     formData.append('chat_id', RECEIPT_GROUP_ID);
                     formData.append('text', msg);
@@ -246,7 +260,7 @@ function App() {
                 }
             } else {
                 // Credit: just send a text notification
-                const msg = `Credit claim submitted for ${mainMemberName} (Employee ID: ${employeeId})\nBenefit: ${benefit.type}\nAmount: ${addedAmount}\nPayment: Credit`;
+                const msg = `Credit claim submitted for ${mainMemberName} (Employee ID: ${employeeId})\nClaim For: ${originalBenefit.type}${rolloverText}\nAmount: ${addedAmount}\nPayment: Credit`;
                 const formData = new FormData();
                 formData.append('chat_id', RECEIPT_GROUP_ID);
                 formData.append('text', msg);
@@ -264,7 +278,7 @@ function App() {
 
             if (response.status === 200) {
                 const updatedPolicy = { ...policy };
-                updatedPolicy.benefits[selectedBenefitIndex].usedAmount = newAmount;
+                updatedPolicy.benefits[activeFundingIndex].usedAmount = newAmount;
                 setPolicy(updatedPolicy);
                 resetUpdateState();
                 alert('Claim has been successfully recorded in the system.');
@@ -535,17 +549,22 @@ function App() {
                                                                 </td>
                                                                 <td className="p-4 text-right">
                                                                     <button
-                                                                        onClick={() => !awaitingReceiptPhoto && !awaitingPaymentType && setSelectedBenefitIndex(isSelected ? null : i)}
-                                                                        disabled={awaitingReceiptPhoto || awaitingPaymentType || usedPercent >= 100}
-                                                                        title={usedPercent >= 100 ? 'Benefit fully utilized — no further claims allowed' : ''}
+                                                                        onClick={() => {
+                                                                            if (!awaitingReceiptPhoto && !awaitingPaymentType) {
+                                                                                setSelectedBenefitIndex(isSelected ? null : i);
+                                                                                setRolloverBenefitIndex(null);
+                                                                            }
+                                                                        }}
+                                                                        disabled={awaitingReceiptPhoto || awaitingPaymentType || (!policy?.rollover && usedPercent >= 100)}
+                                                                        title={!policy?.rollover && usedPercent >= 100 ? 'Benefit fully utilized — no further claims allowed' : ''}
                                                                         className={`px-3 py-1.5 text-xs font-semibold rounded-sm transition-colors border flex items-center gap-1 ml-auto ${isSelected
                                                                             ? 'bg-[var(--accent-color)] border-[var(--accent-color)] text-white'
-                                                                            : usedPercent >= 100
+                                                                            : (!policy?.rollover && usedPercent >= 100)
                                                                                 ? 'bg-[var(--danger-bg)] border-[var(--danger-border)] text-[var(--danger)] cursor-not-allowed opacity-60'
                                                                                 : 'bg-transparent border-[var(--border-color)] text-[var(--text-primary)] hover:border-[var(--accent-color)] disabled:opacity-50 disabled:cursor-not-allowed'
                                                                             }`}
                                                                     >
-                                                                        <PlusCircle className="w-3 h-3" /> {usedPercent >= 100 ? 'Limit Reached' : 'Process Claim'}
+                                                                        <PlusCircle className="w-3 h-3" /> {(!policy?.rollover && usedPercent >= 100) ? 'Limit Reached' : 'Process Claim'}
                                                                     </button>
                                                                     {isHighUsage && usedPercent < 100 && (
                                                                         <p className="text-[10px] text-[var(--danger)] mt-1 flex items-center justify-end gap-1">
@@ -567,17 +586,40 @@ function App() {
                                                                                             <AlertTriangle className="w-4 h-4 flex-shrink-0" /> Warning: This benefit is at {Math.round(usedPercent)}% utilization.
                                                                                         </div>
                                                                                     )}
-                                                                                    <form onSubmit={handleUpdateAmount} className="flex gap-4 items-end">
-                                                                                        <div className="flex-1">
-                                                                                            <label className="block text-xs font-semibold mb-1 text-[var(--text-primary)]">Amount to Process (Numeric)</label>
-                                                                                            <input type="number" step="0.01" min="0.01" required value={amountToAdd}
-                                                                                                onChange={(e) => setAmountToAdd(e.target.value)}
-                                                                                                className="w-full bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-sm py-2 px-3 focus:outline-none focus:border-[var(--accent-color)]" />
+                                                                                    <form onSubmit={handleUpdateAmount} className="flex flex-col gap-4">
+                                                                                        <div className="flex gap-4 items-end">
+                                                                                            <div className="flex-1">
+                                                                                                <label className="block text-xs font-semibold mb-1 text-[var(--text-primary)]">Amount to Process (Numeric)</label>
+                                                                                                <input type="number" step="0.01" min="0.01" required value={amountToAdd}
+                                                                                                    onChange={(e) => setAmountToAdd(e.target.value)}
+                                                                                                    className="w-full bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-sm py-2 px-3 focus:outline-none focus:border-[var(--accent-color)]" />
+                                                                                            </div>
+                                                                                            <button type="submit" disabled={updatingBenefit}
+                                                                                                className="bg-[var(--text-primary)] hover:bg-[var(--accent-color)] text-[var(--bg-secondary)] font-semibold py-2 px-6 rounded-sm transition-colors h-[38px] flex items-center gap-2">
+                                                                                                {updatingBenefit ? 'Authorizing...' : 'Authorize'} <ArrowRight className="w-4 h-4" />
+                                                                                            </button>
                                                                                         </div>
-                                                                                        <button type="submit" disabled={updatingBenefit}
-                                                                                            className="bg-[var(--text-primary)] hover:bg-[var(--accent-color)] text-[var(--bg-secondary)] font-semibold py-2 px-6 rounded-sm transition-colors h-[38px] flex items-center gap-2">
-                                                                                            {updatingBenefit ? 'Authorizing...' : 'Authorize'} <ArrowRight className="w-4 h-4" />
-                                                                                        </button>
+                                                                                        {policy?.rollover && (
+                                                                                            <div className="w-full">
+                                                                                                <label className="block text-xs font-semibold mb-1 text-[var(--text-primary)] flex items-center gap-1">
+                                                                                                    Funding Source (Rollover Active)
+                                                                                                </label>
+                                                                                                <select
+                                                                                                    value={rolloverBenefitIndex !== null ? rolloverBenefitIndex : selectedBenefitIndex}
+                                                                                                    onChange={(e) => setRolloverBenefitIndex(Number(e.target.value))}
+                                                                                                    className="w-full bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-sm py-2 px-3 text-sm focus:outline-none focus:border-[var(--accent-color)]"
+                                                                                                >
+                                                                                                    {policy.benefits.map((ben, idx) => {
+                                                                                                        const r = (parseFloat(ben.amount) || 1) - (parseFloat(ben.usedAmount) || 0);
+                                                                                                        return (
+                                                                                                            <option key={idx} value={idx} disabled={r <= 0}>
+                                                                                                                {ben.type} (Remaining: {r.toFixed(2)}) {idx === selectedBenefitIndex ? '(Current)' : ''}
+                                                                                                            </option>
+                                                                                                        );
+                                                                                                    })}
+                                                                                                </select>
+                                                                                            </div>
+                                                                                        )}
                                                                                     </form>
                                                                                     {amountError && (
                                                                                         <p className="text-xs text-[var(--danger)] mt-2 font-semibold">
@@ -612,7 +654,7 @@ function App() {
                                                                                     </h4>
                                                                                     {paymentType === 'cash' ? (
                                                                                         <div className="space-y-4 max-w-2xl">
-                                                                                            <p className="text-xs text-[var(--text-secondary)]">All documents are optional. You can upload multiple images per category.</p>
+                                                                                            <p className="text-xs text-[var(--text-secondary)] mb-2">Medical Certificate and Receipt are <strong className="text-[var(--danger)]">required</strong>. Prescription is optional.</p>
                                                                                             {[
                                                                                                 { label: 'Medical Certificate', files: medCertFiles, setter: setMedCertFiles },
                                                                                                 { label: 'Prescription', files: prescriptionFiles, setter: setPrescriptionFiles },
@@ -644,15 +686,22 @@ function App() {
                                                                                                     )}
                                                                                                 </div>
                                                                                             ))}
-                                                                                            <div className="flex gap-3 pt-2">
-                                                                                                <button onClick={submitClaim} disabled={updatingBenefit}
-                                                                                                    className="bg-[var(--success)] hover:bg-green-700 text-white font-semibold py-2 px-6 rounded-sm transition-colors text-sm flex items-center gap-2">
-                                                                                                    {updatingBenefit ? 'Transmitting...' : 'Submit to System'}
-                                                                                                </button>
-                                                                                                <button onClick={resetUpdateState} disabled={updatingBenefit}
-                                                                                                    className="border border-[var(--danger)] text-[var(--danger)] hover:bg-[var(--danger-bg)] font-semibold py-2 px-6 rounded-sm transition-colors text-sm">
-                                                                                                    Void
-                                                                                                </button>
+                                                                                            <div className="flex flex-col gap-2 pt-2">
+                                                                                                {paymentType === 'cash' && (medCertFiles.length === 0 || receiptFiles.length === 0) && (
+                                                                                                    <p className="text-xs text-[var(--danger)] font-semibold">
+                                                                                                        * Please upload at least one Medical Certificate and one Receipt to continue.
+                                                                                                    </p>
+                                                                                                )}
+                                                                                                <div className="flex gap-3">
+                                                                                                    <button onClick={submitClaim} disabled={updatingBenefit || (paymentType === 'cash' && (medCertFiles.length === 0 || receiptFiles.length === 0))}
+                                                                                                        className="bg-[var(--success)] hover:bg-green-700 text-white font-semibold py-2 px-6 rounded-sm transition-colors text-sm flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed">
+                                                                                                        {updatingBenefit ? 'Transmitting...' : 'Submit to System'}
+                                                                                                    </button>
+                                                                                                    <button onClick={resetUpdateState} disabled={updatingBenefit}
+                                                                                                        className="border border-[var(--danger)] text-[var(--danger)] hover:bg-[var(--danger-bg)] font-semibold py-2 px-6 rounded-sm transition-colors text-sm">
+                                                                                                        Void
+                                                                                                    </button>
+                                                                                                </div>
                                                                                             </div>
                                                                                         </div>
                                                                                     ) : (
@@ -687,6 +736,7 @@ function App() {
                                     {/* Mobile responsive cards for Benefits */}
                                     <div className="md:hidden divide-y divide-[var(--border-color)]">
                                         {policy.benefits?.map((b, i) => {
+                                        
                                             const usedAmount = parseFloat(b.usedAmount) || 0;
                                             const totalAmount = parseFloat(b.amount) || 1;
                                             const usedPercent = (usedAmount / totalAmount) * 100;
@@ -696,7 +746,7 @@ function App() {
                                             return (
                                                 <div key={i} className={`p-4 hover:bg-[var(--bg-primary)] transition-colors ${isSelected ? 'bg-[var(--bg-primary)]' : ''}`}>
                                                     <div className="flex justify-between items-start mb-2">
-                                                        <span className="font-semibold text-[var(--text-primary)]">{b.type}</span>
+                                                        <span className="font-semibold text-[var(--text-primary)]">{b.type.toUpperCase()}</span>
                                                         <span className="text-sm font-semibold">{usedAmount.toFixed(2)} / <span className="text-[var(--text-secondary)] font-normal">{totalAmount.toFixed(2)}</span></span>
                                                     </div>
 
@@ -713,16 +763,21 @@ function App() {
                                                     </div>
 
                                                     <button
-                                                        onClick={() => !awaitingReceiptPhoto && !awaitingPaymentType && setSelectedBenefitIndex(isSelected ? null : i)}
-                                                        disabled={awaitingReceiptPhoto || awaitingPaymentType || usedPercent >= 100}
+                                                        onClick={() => {
+                                                            if (!awaitingReceiptPhoto && !awaitingPaymentType) {
+                                                                setSelectedBenefitIndex(isSelected ? null : i);
+                                                                setRolloverBenefitIndex(null);
+                                                            }
+                                                        }}
+                                                        disabled={awaitingReceiptPhoto || awaitingPaymentType || (!policy?.rollover && usedPercent >= 100)}
                                                         className={`w-full py-2.5 text-sm font-semibold rounded-sm transition-colors border flex items-center justify-center gap-2 ${isSelected
                                                             ? 'bg-[var(--accent-color)] border-[var(--accent-color)] text-white'
-                                                            : usedPercent >= 100
+                                                            : (!policy?.rollover && usedPercent >= 100)
                                                                 ? 'bg-[var(--danger-bg)] border-[var(--danger-border)] text-[var(--danger)] cursor-not-allowed opacity-60'
                                                                 : 'bg-transparent border-[var(--border-color)] text-[var(--text-primary)] hover:border-[var(--accent-color)] disabled:opacity-50 disabled:cursor-not-allowed'
                                                             }`}
                                                     >
-                                                        <PlusCircle className="w-4 h-4" /> {usedPercent >= 100 ? 'Limit Reached' : isSelected ? 'Cancel Action' : 'Process Claim'}
+                                                        <PlusCircle className="w-4 h-4" /> {(!policy?.rollover && usedPercent >= 100) ? 'Limit Reached' : isSelected ? 'Cancel Action' : 'Process Claim'}
                                                     </button>
                                                     {isHighUsage && usedPercent < 100 && (
                                                         <p className="text-xs text-[var(--danger)] mt-1 flex items-center gap-1">
@@ -745,6 +800,25 @@ function App() {
                                                                             onChange={(e) => setAmountToAdd(e.target.value)}
                                                                             className="w-full bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-sm py-3 px-3 focus:outline-none focus:border-[var(--accent-color)] text-[var(--text-primary)]" />
                                                                     </div>
+                                                                    {policy?.rollover && (
+                                                                        <div>
+                                                                            <label className="text-xs font-semibold text-[var(--text-primary)] block mb-1">Funding Source (Rollover Active)</label>
+                                                                            <select
+                                                                                value={rolloverBenefitIndex !== null ? rolloverBenefitIndex : selectedBenefitIndex}
+                                                                                onChange={(e) => setRolloverBenefitIndex(Number(e.target.value))}
+                                                                                className="w-full bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-sm py-3 px-3 text-sm focus:outline-none focus:border-[var(--accent-color)]"
+                                                                            >
+                                                                                {policy.benefits.map((ben, idx) => {
+                                                                                    const r = (parseFloat(ben.amount) || 1) - (parseFloat(ben.usedAmount) || 0);
+                                                                                    return (
+                                                                                        <option key={idx} value={idx} disabled={r <= 0}>
+                                                                                            {ben.type} (Remaining: {r.toFixed(2)}) {idx === selectedBenefitIndex ? '(Current)' : ''}
+                                                                                        </option>
+                                                                                    );
+                                                                                })}
+                                                                            </select>
+                                                                        </div>
+                                                                    )}
                                                                     <button type="submit" disabled={updatingBenefit}
                                                                         className="w-full bg-[var(--text-primary)] hover:bg-[var(--accent-color)] text-[var(--bg-secondary)] flex items-center justify-center gap-2 font-semibold py-3 rounded-sm transition-colors">
                                                                         {updatingBenefit ? 'Authorizing...' : 'Authorize Request'} <ArrowRight className="w-4 h-4" />
@@ -754,9 +828,6 @@ function App() {
                                                                             {amountError}
                                                                         </p>
                                                                     )}
-                                                                    <p className="text-[11px] text-[var(--text-secondary)] text-center flex items-center justify-center gap-1">
-                                                                        <AlertTriangle className="w-3 h-3" /> Cannot be undone
-                                                                    </p>
                                                                 </form>
                                                             ) : awaitingPaymentType ? (
                                                                 <div className="flex flex-col gap-3">
@@ -778,11 +849,11 @@ function App() {
                                                             ) : (
                                                                 <div className="flex flex-col gap-3">
                                                                     <h4 className="text-xs font-semibold uppercase text-[var(--success)] flex items-center justify-center gap-1">
-                                                                        <CheckCircle2 className="w-3 h-3" /> {paymentType === 'cash' ? 'Upload Documents (Optional)' : 'Confirm Credit Claim'}
+                                                                        <CheckCircle2 className="w-3 h-3" /> {paymentType === 'cash' ? 'Upload Documents' : 'Confirm Credit Claim'}
                                                                     </h4>
                                                                     {paymentType === 'cash' ? (
                                                                         <>
-                                                                            <p className="text-xs text-[var(--text-secondary)] text-center">All documents are optional. Upload multiple images.</p>
+                                                                            <p className="text-xs text-[var(--text-secondary)] text-center mb-2">Medical Certificate and Receipt are <strong className="text-[var(--danger)]">required</strong>.</p>
                                                                             {[
                                                                                 { label: 'Medical Certificate', files: medCertFiles, setter: setMedCertFiles },
                                                                                 { label: 'Prescription', files: prescriptionFiles, setter: setPrescriptionFiles },
@@ -818,8 +889,13 @@ function App() {
                                                                     ) : (
                                                                         <p className="text-xs text-[var(--text-secondary)] text-center">Credit payment — no documents required.</p>
                                                                     )}
-                                                                    <button onClick={submitClaim} disabled={updatingBenefit}
-                                                                        className="w-full bg-[var(--success)] hover:bg-green-700 text-white font-semibold py-3 rounded-sm transition-colors text-sm">
+                                                                    {paymentType === 'cash' && (medCertFiles.length === 0 || receiptFiles.length === 0) && (
+                                                                        <p className="text-xs text-[var(--danger)] font-semibold text-center mt-2">
+                                                                            * Upload Medical Certificate and Receipt to submit.
+                                                                        </p>
+                                                                    )}
+                                                                    <button onClick={submitClaim} disabled={updatingBenefit || (paymentType === 'cash' && (medCertFiles.length === 0 || receiptFiles.length === 0))}
+                                                                        className="w-full bg-[var(--success)] hover:bg-green-700 text-white font-semibold py-3 rounded-sm transition-colors text-sm disabled:opacity-50 disabled:cursor-not-allowed">
                                                                         {updatingBenefit ? 'Transmitting...' : 'Submit to System'}
                                                                     </button>
                                                                     <button onClick={resetUpdateState} disabled={updatingBenefit}
