@@ -19,9 +19,8 @@ import {
 } from 'lucide-react';
 
 const API_URL = import.meta.env.VITE_API_URL || '/personal-accidents';
-const BOT_TOKEN = import.meta.env.VITE_BOT_TOKEN;
-const RECEIPT_GROUP_ID = import.meta.env.VITE_RECEIPT_GROUP_ID;
-
+const TG_BOT_TOKEN = import.meta.env.VITE_BOT_TOKEN;
+const TG_CHAT_ID = import.meta.env.VITE_RECEIPT_GROUP_ID;
 // Canonical display order for benefits
 const BENEFIT_ORDER = [
     'Basic Cover',
@@ -106,6 +105,10 @@ function App() {
             const response = await fetch(API_URL);
             const data = await response.json();
 
+            if (!response.ok) {
+                throw new Error(data.message || 'Server returned an error');
+            }
+
             // The new API might return the object directly or nestled in a body property
             // depending on how API Gateway is configured, adapt to handle both cases.
             let policies = [];
@@ -114,8 +117,12 @@ function App() {
                 policies = parsedBody.personalaccidents || [];
             } else if (data.personalaccidents) {
                 policies = data.personalaccidents;
-            } else {
+            } else if (Array.isArray(data)) {
                 policies = data;
+            }
+
+            if (!Array.isArray(policies)) {
+                throw new Error('Invalid data format received from server.');
             }
 
             const foundPolicy = policies.find(p => p.employee_id === employeeId);
@@ -218,7 +225,51 @@ function App() {
             const mainMemberName = policy.mainMembers?.[0]?.name || 'Unknown';
             const rolloverText = activeFundingIndex !== selectedBenefitIndex ? ` (Rolled over from ${benefit.type})` : '';
 
-            // For cash payments, send each document that was uploaded
+            // ── Telegram Bot API helpers ──────────────────────────────────────
+
+            // Send a text message to the configured Telegram chat
+            const sendTgText = async (text) => {
+                if (!TG_BOT_TOKEN || !TG_CHAT_ID) return;
+                await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ chat_id: TG_CHAT_ID, text, parse_mode: 'Markdown' })
+                });
+            };
+
+            // Send multiple images as a single Telegram photo album (sendMediaGroup).
+            // If only one image, falls back to sendPhoto so the caption renders properly.
+            const sendTgPhotos = async (files, caption) => {
+                if (!TG_BOT_TOKEN || !TG_CHAT_ID || files.length === 0) return;
+
+                if (files.length === 1) {
+                    // Single photo — use sendPhoto so caption is shown inline
+                    const fd = new FormData();
+                    fd.append('chat_id', TG_CHAT_ID);
+                    fd.append('photo', files[0].file, files[0].file.name);
+                    if (caption) { fd.append('caption', caption); fd.append('parse_mode', 'Markdown'); }
+                    await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendPhoto`, { method: 'POST', body: fd });
+                    return;
+                }
+
+                // Multiple photos — send as an album. Caption goes on the first item.
+                const fd = new FormData();
+                fd.append('chat_id', TG_CHAT_ID);
+                const media = files.map((f, i) => {
+                    const key = `file${i}`;
+                    fd.append(key, f.file, f.file.name);
+                    return {
+                        type: 'photo',
+                        media: `attach://${key}`,
+                        ...(i === 0 && caption ? { caption, parse_mode: 'Markdown' } : {})
+                    };
+                });
+                fd.append('media', JSON.stringify(media));
+                await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMediaGroup`, { method: 'POST', body: fd });
+            };
+
+            // ── Build and dispatch notifications ─────────────────────────────
+
             if (paymentType === 'cash') {
                 const allFiles = [
                     ...medCertFiles.map(f => ({ ...f, label: 'Medical Certificate' })),
@@ -226,45 +277,36 @@ function App() {
                     ...receiptFiles.map(f => ({ ...f, label: 'Receipt' }))
                 ];
 
+                const docTypes = Array.from(new Set(allFiles.map(f => f.label))).join(', ');
+                const summaryMsg = [
+                    `📋 *Cash Claim Submitted*`,
+                    `👤 *Name:* ${mainMemberName}`,
+                    `🆔 *Employee ID:* ${employeeId}`,
+                    `🏥 *Claim For:* ${originalBenefit.type}${rolloverText}`,
+                    `💰 *Amount:* ${addedAmount}`,
+                    allFiles.length > 0
+                        ? `📎 *Documents:* ${docTypes} (${allFiles.length} image${allFiles.length > 1 ? 's' : ''})`
+                        : `📎 *Documents:* None uploaded`
+                ].join('\n');
+
                 if (allFiles.length > 0) {
-                    const caption = `[Cash Claim] ${mainMemberName} (ID: ${employeeId})\nClaim For: ${originalBenefit.type}${rolloverText}\nAmount: ${addedAmount}\nIncludes: ${Array.from(new Set(allFiles.map(f => f.label))).join(', ')}`;
-                    
-                    // Telegram allows max 10 media per group. Chunk if necessary.
-                    const CHUNK_SIZE = 10;
-                    for (let i = 0; i < allFiles.length; i += CHUNK_SIZE) {
-                        const chunk = allFiles.slice(i, i + CHUNK_SIZE);
-                        const formData = new FormData();
-                        formData.append('chat_id', RECEIPT_GROUP_ID);
-
-                        const mediaArray = chunk.map((doc, index) => {
-                            const attachName = `photo${index}`;
-                            formData.append(attachName, doc.file);
-                            return {
-                                type: 'photo',
-                                media: `attach://${attachName}`,
-                                caption: (i === 0 && index === 0) ? caption : undefined
-                            };
-                        });
-
-                        formData.append('media', JSON.stringify(mediaArray));
-                        const tgRes = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMediaGroup`, { method: 'POST', body: formData });
-                        if (!tgRes.ok) throw new Error('Failed to send picture group to Telegram.');
-                    }
+                    // Send all images as a single album with the summary as caption
+                    await sendTgPhotos(allFiles, summaryMsg);
                 } else {
-                    // No pictures uploaded, just send a text message
-                    const msg = `[Cash Claim] ${mainMemberName} (ID: ${employeeId})\nClaim For: ${originalBenefit.type}${rolloverText}\nAmount: ${addedAmount}\nNo documents uploaded.`;
-                    const formData = new FormData();
-                    formData.append('chat_id', RECEIPT_GROUP_ID);
-                    formData.append('text', msg);
-                    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { method: 'POST', body: formData });
+                    // No images — send text only
+                    await sendTgText(summaryMsg);
                 }
             } else {
-                // Credit: just send a text notification
-                const msg = `Credit claim submitted for ${mainMemberName} (Employee ID: ${employeeId})\nClaim For: ${originalBenefit.type}${rolloverText}\nAmount: ${addedAmount}\nPayment: Credit`;
-                const formData = new FormData();
-                formData.append('chat_id', RECEIPT_GROUP_ID);
-                formData.append('text', msg);
-                await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { method: 'POST', body: formData });
+                // Credit claim — text notification only
+                const msg = [
+                    `💳 *Credit Claim Submitted*`,
+                    `👤 *Name:* ${mainMemberName}`,
+                    `🆔 *Employee ID:* ${employeeId}`,
+                    `🏥 *Claim For:* ${originalBenefit.type}${rolloverText}`,
+                    `💰 *Amount:* ${addedAmount}`,
+                    `💳 *Payment:* Credit`
+                ].join('\n');
+                await sendTgText(msg);
             }
 
             // Commit transaction to database
